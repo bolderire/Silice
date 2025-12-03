@@ -1,11 +1,5 @@
-// Minimal final firmware: menu of music files and playback
-// Folders:
-//   /music : contains .raw files (PCM mono 8-bit 8 kHz)
-// Controls:
-//   B3 = up, B4 = down, B1 = play selected
-// Notes:
-//   - Buttons 3/4 are swapped on hardware, we remap them here.
-//   - No images/volume/next/prev yet; add later once this base works.
+// Minimal project firmware: menu of .raw files in /music, play on B1
+// Borrowed patterns from step3_menu and step4_list_files
 
 #include "config.h"
 #include "std.h"
@@ -17,27 +11,27 @@
 #include "fat_io_lib/src/fat_filelib.h"
 #include <string.h>
 
-#define MAX_FILES 16
+#define MAX_FILES 32
 #define NAME_LEN  64
 #define MUSIC_DIR "/music"
-#define IMG_DIR   "/img"
 
 static char files[MAX_FILES][NAME_LEN];
 static int  file_count = 0;
 
-// Logical bits after remap
-#define BTN_PLAY   0  // B1 (raw0)
+#define BTN_PLAY   1  // play (raw1)
 #define BTN_UP     3  // B3 (raw3)
 #define BTN_DOWN   4  // B4 (raw4)
 
-// Remap raw BUTTONS to logical (swap raw3/raw4 if needed)
 static inline int read_buttons()
 {
   int b = *BUTTONS;
+  int play  = (b >> 1) & 1; // raw1
   int up    = (b >> 3) & 1; // raw3
   int down  = (b >> 4) & 1; // raw4
-  int out   = b & ~((1<<3)|(1<<4));
-  out |= (up<<3) | (down<<4);
+  int out   = 0;
+  out |= (play<<BTN_PLAY);
+  out |= (up<<BTN_UP);
+  out |= (down<<BTN_DOWN);
   return out;
 }
 
@@ -97,33 +91,97 @@ static void draw_menu(int selected)
   display_refresh();
 }
 
-// show image named "<filename>.img" in /img (128x128 8-bit grayscale)
-static void show_image(const char *filename)
+// display image for a given track if available, else show default /img/img.raw (no rotation)
+static void show_image_for_fixed(const char *track)
 {
   char path[NAME_LEN + 10];
   int l = 0;
   path[l++] = '/'; path[l++] = 'i'; path[l++] = 'm'; path[l++] = 'g'; path[l++] = '/';
-  for (int i = 0; filename[i] && l < (int)sizeof(path)-6; ++i) {
-    path[l++] = filename[i];
+  for (int i = 0; track[i] && l < (int)sizeof(path)-6; ++i) {
+    path[l++] = track[i];
+  }
+  // replace ".raw" suffix by "_img.raw"
+  if (l >= 4) {
+    path[l-4] = '_';
+    path[l-3] = 'i';
+    path[l-2] = 'm';
+    path[l-1] = 'g';
   }
   path[l++] = '.';
-  path[l++] = 'i';
-  path[l++] = 'm';
-  path[l++] = 'g';
-  path[l++] = 0;
+  path[l++] = 'r';
+  path[l++] = 'a';
+  path[l++] = 'w';
+  path[l]   = 0;
 
   FL_FILE *img = fl_fopen(path, "rb");
   if (img == NULL) {
-    return;
+    img = fl_fopen("/img/img.raw", "rb");
+    if (img == NULL) return;
   }
-  unsigned char *fb = (unsigned char*)display_framebuffer();
-  memset(fb, 0, 128*128);
-  fl_fread(fb, 1, 128*128, img);
+  static unsigned char tmp[128*128];
+  fl_fread(tmp, 1, 128*128, img);
   fl_fclose(img);
+  // rotation + vertical flip: dest(y,x) <- src(x,127-y) with y flipped
+  unsigned char *fb = (unsigned char*)display_framebuffer();
+  for (int y = 0; y < 128; ++y) {
+    for (int x = 0; x < 128; ++x) {
+      fb[(127 - y)*128 + x] = tmp[x*128 + (127 - y)];
+    }
+  }
   display_refresh();
 }
 
-// play selected file; returns when done or error
+// display image for a given track if available, else show default /img/img.raw
+static void show_image_for(const char *track)
+{
+  char path[NAME_LEN + 10];
+  int l = 0;
+  path[l++] = '/'; path[l++] = 'i'; path[l++] = 'm'; path[l++] = 'g'; path[l++] = '/';
+  for (int i = 0; track[i] && l < (int)sizeof(path)-6; ++i) {
+    path[l++] = track[i];
+  }
+  // replace ".raw" suffix by "_img.raw"
+  if (l >= 4) {
+    path[l-4] = '_';
+    path[l-3] = 'i';
+    path[l-2] = 'm';
+    path[l-1] = 'g';
+  }
+  path[l++] = '.';
+  path[l++] = 'r';
+  path[l++] = 'a';
+  path[l++] = 'w';
+  path[l]   = 0;
+
+  // try specific image first
+  FL_FILE *img = fl_fopen(path, "rb");
+  if (img == NULL) {
+    // fallback to default
+    img = fl_fopen("/img/img.raw", "rb");
+    if (img == NULL) return;
+  }
+  static unsigned char tmp[128*128];
+  fl_fread(tmp, 1, 128*128, img);
+  fl_fclose(img);
+  // rotate 90° counter-clockwise into framebuffer
+  unsigned char *fb = (unsigned char*)display_framebuffer();
+  for (int y = 0; y < 128; ++y) {
+    for (int x = 0; x < 128; ++x) {
+      fb[y*128 + x] = tmp[(127 - x)*128 + y];
+    }
+  }
+  display_refresh();
+}
+
+// clear framebuffer and refresh (avoids lingering image)
+static void clear_screen()
+{
+  unsigned char *fb = (unsigned char*)display_framebuffer();
+  memset(fb, 0, 128*128);
+  display_refresh();
+}
+
+// play selected file; returns when done
 static void play_file(const char *filename)
 {
   char path[NAME_LEN + 10];
@@ -145,8 +203,8 @@ static void play_file(const char *filename)
   printf("\nplaying %s ...\n", filename);
   display_refresh();
 
-  // show associated image if present
-  show_image(filename);
+  // visual cue even si pas de son (affiche /img/img.raw si présent)
+  show_image_for_fixed(filename);
 
   clear_audio();
 
@@ -155,19 +213,22 @@ static void play_file(const char *filename)
     int *addr = (int*)(*AUDIO);
     int sz = fl_fread(addr, 1, 512, f);
     if (sz <= 0) break;
-
-    // pad if partial last block
     for (int i = sz; i < 512; ++i) { ((unsigned char*)addr)[i] = 128; }
 
-    // wait buffer swap, allow abort with B1 (play) to stop
     while (addr == (int*)(*AUDIO)) {
       int btns = read_buttons();
       int rising = btns & (~prev_btns);
       prev_btns = btns;
-      if (rising & (1<<BTN_PLAY)) { fl_fclose(f); return; }
+      if (rising & (1<<BTN_PLAY)) {
+        fl_fclose(f);
+        clear_audio(); // stop immediately
+        clear_screen(); // prepare screen for menu redraw
+        return;
+      }
     }
   }
   fl_fclose(f);
+  clear_audio(); // ensure silence and clean state
   display_set_front_back_color(255,0);
   printf("done.\n");
   display_refresh();
@@ -198,8 +259,13 @@ void main()
   scan_files();
   int selected = 0;
   int prev_btns = read_buttons();
+  int need_clear = 1; // clear once before first menu
 
   while (1) {
+    if (need_clear) {
+      clear_screen();
+      need_clear = 0;
+    }
     draw_menu(selected);
     int btns = read_buttons();
     int rising = btns & (~prev_btns);
@@ -210,10 +276,9 @@ void main()
     if (rising & (1<<BTN_DOWN)) {
       if (file_count) { selected = (selected + 1) % file_count; }
     }
-    // lancement sur front (impulsion) de B1
     if ((rising & (1<<BTN_PLAY)) && file_count > 0) {
       play_file(files[selected]);
-      oled_clear(0);
+      need_clear = 0; // play_file clears when exiting on stop; no extra clear
     }
 
     prev_btns = btns;
