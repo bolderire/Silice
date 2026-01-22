@@ -46,6 +46,90 @@ static void clear_audio()
   }
 }
 
+static long file_size(FL_FILE *f)
+{
+  fl_fseek(f, 0, SEEK_END);
+  long sz = fl_ftell(f);
+  fl_fseek(f, 0, SEEK_SET);
+  return sz;
+}
+
+static void render_image_rgb(const unsigned char *row, int y_src, int mode, int bpp)
+{
+  unsigned char rline[128];
+  unsigned char gline[128];
+  unsigned char bline[128];
+
+  for (int x = 0; x < 128; ++x) {
+    int base = x * bpp;
+    rline[x] = row[base + 0];
+    bline[x] = row[base + 1];
+    gline[x] = row[base + 2];
+  }
+
+  for (int c = 0; c < 3; ++c) {
+    *RGBSEL = c;
+    unsigned char *fb = (unsigned char*)display_framebuffer();
+    for (int x = 0; x < 128; ++x) {
+      int dest_y = x;
+      int dest_x = y_src;
+      if (mode != 0) {
+        dest_x = 127 - y_src;
+      }
+      int dest   = dest_y * 128 + dest_x;
+      unsigned char v = (c == 0) ? rline[x] : (c == 1) ? gline[x] : bline[x];
+      fb[dest] = v;
+    }
+  }
+}
+
+static void render_image_gray(const unsigned char *row, int y_src, int mode)
+{
+  for (int c = 0; c < 3; ++c) {
+    *RGBSEL = c;
+    unsigned char *fb = (unsigned char*)display_framebuffer();
+    for (int x = 0; x < 128; ++x) {
+      int dest_y = x;
+      int dest_x = y_src;
+      if (mode != 0) {
+        dest_x = 127 - y_src;
+      }
+      int dest   = dest_y * 128 + dest_x;
+      fb[dest] = row[x];
+    }
+  }
+}
+
+static void render_image_stream(FL_FILE *img, int mode)
+{
+  long sz = file_size(img);
+  if (sz >= 128L * 128 * 4) {
+    unsigned char row[128 * 4];
+    for (int y = 0; y < 128; ++y) {
+      if (fl_fread(row, 1, sizeof(row), img) != sizeof(row)) {
+        break;
+      }
+      render_image_rgb(row, y, mode, 4);
+    }
+  } else if (sz >= 128L * 128 * 3) {
+    unsigned char row[128 * 3];
+    for (int y = 0; y < 128; ++y) {
+      if (fl_fread(row, 1, sizeof(row), img) != sizeof(row)) {
+        break;
+      }
+      render_image_rgb(row, y, mode, 3);
+    }
+  } else if (sz >= 128L * 128) {
+    unsigned char row[128];
+    for (int y = 0; y < 128; ++y) {
+      if (fl_fread(row, 1, sizeof(row), img) != sizeof(row)) {
+        break;
+      }
+      render_image_gray(row, y, mode);
+    }
+  }
+}
+
 static void scan_files()
 {
   file_count = 0;
@@ -118,16 +202,8 @@ static void show_image_for_fixed(const char *track)
     img = fl_fopen("/img/img.raw", "rb");
     if (img == NULL) return;
   }
-  static unsigned char tmp[128*128];
-  fl_fread(tmp, 1, 128*128, img);
+  render_image_stream(img, 0);
   fl_fclose(img);
-  // rotation + vertical flip: dest(y,x) <- src(x,127-y) with y flipped
-  unsigned char *fb = (unsigned char*)display_framebuffer();
-  for (int y = 0; y < 128; ++y) {
-    for (int x = 0; x < 128; ++x) {
-      fb[(127 - y)*128 + x] = tmp[x*128 + (127 - y)];
-    }
-  }
   display_refresh();
 }
 
@@ -160,24 +236,19 @@ static void show_image_for(const char *track)
     img = fl_fopen("/img/img.raw", "rb");
     if (img == NULL) return;
   }
-  static unsigned char tmp[128*128];
-  fl_fread(tmp, 1, 128*128, img);
+  render_image_stream(img, 1);
   fl_fclose(img);
-  // rotate 90° counter-clockwise into framebuffer
-  unsigned char *fb = (unsigned char*)display_framebuffer();
-  for (int y = 0; y < 128; ++y) {
-    for (int x = 0; x < 128; ++x) {
-      fb[y*128 + x] = tmp[(127 - x)*128 + y];
-    }
-  }
   display_refresh();
 }
 
 // clear framebuffer and refresh (avoids lingering image)
 static void clear_screen()
 {
-  unsigned char *fb = (unsigned char*)display_framebuffer();
-  memset(fb, 0, 128*128);
+  for (int c = 0; c < 3; ++c) {
+    *RGBSEL = c;
+    unsigned char *fb = (unsigned char*)display_framebuffer();
+    memset(fb, 0, 128*128);
+  }
   display_refresh();
 }
 

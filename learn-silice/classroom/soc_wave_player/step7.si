@@ -35,13 +35,9 @@ group mem_io
 
 unit audio(input  uint8 audio_in,output uint4 audio_out)
 {
-  uint8 counter = 0;
-  uint4 low     = 0;
-  uint4 high    = 15;
   always {
-    uint8 frac  = audio_in;
-    audio_out   = counter < frac ? high : low;
-    counter     = counter + 1;
+    // simple passthrough
+    audio_out = audio_in[4,4];
   }
 }
 
@@ -212,7 +208,7 @@ $$end
      & ~framebuffer_access
                                     ) {
       /// LEDs
-      leds           = leds_access ? prev_wdata[0,8] : leds;
+      leds           = leds_access   ? prev_wdata[0,8] : leds;
       /// rgbsel
       rgbsel         = rgbsel_access ? prev_wdata[0,2] : rgbsel;
       if (rgbsel_access) {
@@ -258,7 +254,7 @@ $$end
       frame_buffer.wenable1 = framebuffer_access;
       fb_enabled            = fb_enabled | framebuffer_access;
       frame_buffer.addr1    = {rgbsel,prev_mem_addr[0,12],which}; //addr from CPU (32bits)
-      uint8 clr = prev_wdata >> {which,3b0}; // get 8 bit channel value
+      uint8 clr   = prev_wdata >> {which,3b0}; // get 8 bit channel value
       frame_buffer.wdata1   = {2b00,clr[2,6]}; // remap to 6 bits per channel
     }
 

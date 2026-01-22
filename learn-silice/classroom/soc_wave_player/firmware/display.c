@@ -17,6 +17,23 @@ unsigned char back_color;
 unsigned char framebuffer[128*128];
 #endif
 
+#ifdef HWFBUFFER
+static inline void write_pixel_gray(int idx, unsigned char value)
+{
+  *RGBSEL = 0;
+  framebuffer[idx] = value;
+  *RGBSEL = 1;
+  framebuffer[idx] = value;
+  *RGBSEL = 2;
+  framebuffer[idx] = value;
+}
+#else
+static inline void write_pixel_gray(int idx, unsigned char value)
+{
+  framebuffer[idx] = value;
+}
+#endif
+
 volatile unsigned char *display_framebuffer()
 {
   return framebuffer;
@@ -52,8 +69,10 @@ void display_putchar(int c)
     int sz_i = min( 128-cursor_x, 5 );
     for (int j=0;j<sz_j;j++) {
       for (int i=0;i<sz_i;i++) {
-        framebuffer[ (cursor_y + j) + ((cursor_x+i)<<7) ]
-            = (font[c-32][i] & (1<<j)) ? front_color : back_color;
+        int idx = (cursor_y + j) + ((cursor_x+i)<<7);
+        unsigned char value =
+            (font[c-32][i] & (1<<j)) ? front_color : back_color;
+        write_pixel_gray(idx, value);
       }
     }
   }
