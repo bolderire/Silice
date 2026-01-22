@@ -12,5 +12,6 @@ extern volatile int* const SDCARD;
 extern volatile int* const AUDIO;
 extern volatile int* const BUTTONS;
 extern volatile int* const RGBSEL;
+extern volatile int* const VOLUME;
 extern volatile int* const DISPLAY;
 extern volatile int* const SNDGEN;

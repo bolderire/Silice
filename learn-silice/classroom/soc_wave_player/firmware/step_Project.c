@@ -22,6 +22,8 @@ static int  file_count = 0;
 #define BTN_UP     3  // B3 (raw3)
 #define BTN_DOWN   4  // B4 (raw4)
 
+static int g_volume = 8;
+
 static inline int read_buttons()
 {
   int b = *BUTTONS;
@@ -44,6 +46,18 @@ static void clear_audio()
     memset(addr, 0, 512);
     while (addr == (int*)(*AUDIO)) { }
   }
+}
+
+static void set_volume_leds(int volume)
+{
+  int v = volume;
+  if (v < 0) v = 0;
+  if (v > 8) v = 8;
+  int mask = 0;
+  for (int i = 0; i < v; ++i) {
+    mask |= (1 << (7 - i));
+  }
+  *LEDS = mask;
 }
 
 static long file_size(FL_FILE *f)
@@ -278,6 +292,8 @@ static void play_file(const char *filename)
   show_image_for_fixed(filename);
 
   clear_audio();
+  *VOLUME = g_volume;
+  set_volume_leds(g_volume);
 
   int prev_btns = read_buttons();
   while (1) {
@@ -290,6 +306,16 @@ static void play_file(const char *filename)
       int btns = read_buttons();
       int rising = btns & (~prev_btns);
       prev_btns = btns;
+      if (rising & (1<<BTN_UP)) {
+        if (g_volume < 8) { g_volume++; }
+        *VOLUME = g_volume;
+        set_volume_leds(g_volume);
+      }
+      if (rising & (1<<BTN_DOWN)) {
+        if (g_volume > 1) { g_volume--; }
+        *VOLUME = g_volume;
+        set_volume_leds(g_volume);
+      }
       if (rising & (1<<BTN_PLAY)) {
         fl_fclose(f);
         clear_audio(); // stop immediately
@@ -308,6 +334,7 @@ static void play_file(const char *filename)
 void main()
 {
   *LEDS = 0;
+  *VOLUME = g_volume;
   f_putchar = display_putchar;
   oled_init();
   oled_fullscreen();
