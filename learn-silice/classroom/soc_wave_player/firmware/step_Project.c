@@ -22,7 +22,12 @@ static int  file_count = 0;
 #define BTN_UP     3  // B3 (raw3)
 #define BTN_DOWN   4  // B4 (raw4)
 
-static int g_volume = 8;
+static int g_volume = 4; // initial volume
+
+#define SAMPLE_RATE_HZ 8000 
+#define REPEAT_DELAY_SAMPLES  (SAMPLE_RATE_HZ/3)  // 300ms
+#define REPEAT_PERIOD_SAMPLES (SAMPLE_RATE_HZ/10) // 100ms
+#define AUDIO_BUFFER_SAMPLES  512
 
 static inline int read_buttons()
 {
@@ -296,6 +301,11 @@ static void play_file(const char *filename)
   set_volume_leds(g_volume);
 
   int prev_btns = read_buttons();
+  int hold_up_samples = 0;
+  int hold_down_samples = 0;
+  int repeat_up_samples = 0;
+  int repeat_down_samples = 0;
+  int current_btns = prev_btns;
   while (1) {
     int *addr = (int*)(*AUDIO);
     int sz = fl_fread(addr, 1, 512, f);
@@ -304,6 +314,7 @@ static void play_file(const char *filename)
 
     while (addr == (int*)(*AUDIO)) {
       int btns = read_buttons();
+      current_btns = btns;
       int rising = btns & (~prev_btns);
       prev_btns = btns;
       if (rising & (1<<BTN_UP)) {
@@ -312,7 +323,7 @@ static void play_file(const char *filename)
         set_volume_leds(g_volume);
       }
       if (rising & (1<<BTN_DOWN)) {
-        if (g_volume > 1) { g_volume--; }
+        if (g_volume > 0) { g_volume--; }
         *VOLUME = g_volume;
         set_volume_leds(g_volume);
       }
@@ -322,6 +333,38 @@ static void play_file(const char *filename)
         clear_screen(); // prepare screen for menu redraw
         return;
       }
+    }
+
+    if (current_btns & (1<<BTN_UP)) {
+      hold_up_samples += AUDIO_BUFFER_SAMPLES;
+      if (hold_up_samples >= REPEAT_DELAY_SAMPLES) {
+        repeat_up_samples += AUDIO_BUFFER_SAMPLES;
+        while (repeat_up_samples >= REPEAT_PERIOD_SAMPLES) {
+          if (g_volume < 8) { g_volume++; }
+          *VOLUME = g_volume;
+          set_volume_leds(g_volume);
+          repeat_up_samples -= REPEAT_PERIOD_SAMPLES;
+        }
+      }
+    } else {
+      hold_up_samples = 0;
+      repeat_up_samples = 0;
+    }
+
+    if (current_btns & (1<<BTN_DOWN)) {
+      hold_down_samples += AUDIO_BUFFER_SAMPLES;
+      if (hold_down_samples >= REPEAT_DELAY_SAMPLES) {
+        repeat_down_samples += AUDIO_BUFFER_SAMPLES;
+        while (repeat_down_samples >= REPEAT_PERIOD_SAMPLES) {
+          if (g_volume > 0) { g_volume--; }
+          *VOLUME = g_volume;
+          set_volume_leds(g_volume);
+          repeat_down_samples -= REPEAT_PERIOD_SAMPLES;
+        }
+      }
+    } else {
+      hold_down_samples = 0;
+      repeat_down_samples = 0;
     }
   }
   fl_fclose(f);
