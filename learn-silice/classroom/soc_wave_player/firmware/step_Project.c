@@ -1,6 +1,3 @@
-// Minimal project firmware: menu of .raw files in /music, play on B1
-// Borrowed patterns from step3_menu and step4_list_files
-
 #include "config.h"
 #include "std.h"
 #include "oled.h"
@@ -21,6 +18,9 @@ static int  file_count = 0;
 #define BTN_PLAY   1  // play (raw1)
 #define BTN_UP     3  // B3 (raw3)
 #define BTN_DOWN   4  // B4 (raw4)
+#define BTN_PLAYPAUSE 2  // B2 (raw2)
+#define BTN_PREV   5  // B5 (raw5)
+#define BTN_NEXT   6  // B6 (raw6)
 
 static int g_volume = 4; // initial volume
 
@@ -29,16 +29,47 @@ static int g_volume = 4; // initial volume
 #define REPEAT_PERIOD_SAMPLES (SAMPLE_RATE_HZ/10) // 100ms
 #define AUDIO_BUFFER_SAMPLES  512
 
+#define ENABLE_LOADING_MESSAGE 1
+
+static void show_hourglass()
+{
+  int width_px = 6 * 5;
+  int height_px = 5 * 8;
+  int x = (128 - width_px) / 2;
+  int y = (128 - height_px) / 2;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  display_set_front_back_color(255,0);
+  display_set_cursor(x,y + 0*8);
+  printf("+====+");
+  display_set_cursor(x,y + 1*8);
+  printf("|(::)|");
+  display_set_cursor(x,y + 2*8);
+  printf("| )( |");
+  display_set_cursor(x,y + 3*8);
+  printf("|(..)|");
+  display_set_cursor(x,y + 4*8);
+  printf("+====+");
+  display_refresh();
+}
+
+
 static inline int read_buttons()
 {
   int b = *BUTTONS;
   int play  = (b >> 1) & 1; // raw1
+  int playpause = (b >> 2) & 1; // raw2
   int up    = (b >> 3) & 1; // raw3
   int down  = (b >> 4) & 1; // raw4
+  int prev  = (b >> 5) & 1; // raw5
+  int next  = (b >> 6) & 1; // raw6
   int out   = 0;
   out |= (play<<BTN_PLAY);
+  out |= (playpause<<BTN_PLAYPAUSE);
   out |= (up<<BTN_UP);
   out |= (down<<BTN_DOWN);
+  out |= (prev<<BTN_PREV);
+  out |= (next<<BTN_NEXT);
   return out;
 }
 
@@ -65,6 +96,99 @@ static void set_volume_leds(int volume)
   *LEDS = mask;
 }
 
+static void set_pixel_gray(int x, int y, unsigned char v)
+{
+  if (x < 0 || x >= 128 || y < 0 || y >= 128) return;
+  for (int c = 0; c < 3; ++c) {
+    *RGBSEL = c;
+    unsigned char *fb = (unsigned char*)display_framebuffer();
+    // framebuffer is x-major: index = x*128 + y
+    fb[x*128 + y] = v;
+  }
+}
+
+static void fill_rect_gray(int x, int y, int w, int h, unsigned char v)
+{
+  for (int j = 0; j < h; ++j) {
+    for (int i = 0; i < w; ++i) {
+      set_pixel_gray(x + i, y + j, v);
+    }
+  }
+}
+
+static int g_last_progress = -1;
+
+static void draw_progress_bar(long current, long total)
+{
+  const int bar_x = 10;
+  const int bar_y = 90;
+  const int bar_w = 108;
+  const int bar_h = 3;
+  if (total <= 0) return;
+  int filled = (int)((current * bar_w) / total);
+  if (filled < 0) filled = 0;
+  if (filled > bar_w) filled = bar_w;
+  if (g_last_progress < 0) {
+    fill_rect_gray(bar_x, bar_y, bar_w, bar_h, 0);
+    fill_rect_gray(bar_x, bar_y, filled, bar_h, 255);
+  } else if (filled != g_last_progress) {
+    if (filled > g_last_progress) {
+      fill_rect_gray(bar_x + g_last_progress, bar_y, filled - g_last_progress, bar_h, 255);
+    } else {
+      fill_rect_gray(bar_x + filled, bar_y, g_last_progress - filled, bar_h, 0);
+    }
+  }
+  g_last_progress = filled;
+}
+
+static void draw_title(const char *title)
+{
+  display_set_front_back_color(255,0);
+  display_set_cursor(0,68);
+  printf("%s", title);
+}
+
+static void draw_controls(int paused)
+{
+  display_set_front_back_color(255,0);
+  const char *line = paused ? " <   ||   > " : " <   >    > ";
+  int len = 0;
+  while (line[len]) { len++; }
+  int width_px = len * 5;
+  int x = (128 - width_px) / 2;
+  if (x < 0) x = 0;
+  display_set_cursor(x,104);
+  printf("%s", line);
+}
+
+static void build_title(const char *filename, char *out, int out_sz)
+{
+  int j = 0;
+  for (int i = 0; filename[i] && j < out_sz - 1; ++i) {
+    char c = filename[i];
+    if (c == '.') break;
+    if (c == '_') c = ' ';
+    out[j++] = c;
+  }
+  out[j] = 0;
+}
+
+static void update_ui(const char *title, long current, long total, int paused)
+{
+  fill_rect_gray(0, 64, 128, 64, 0);
+  g_last_progress = -1;
+  draw_title(title);
+  draw_progress_bar(current, total);
+  draw_controls(paused);
+  display_refresh();
+}
+
+static void update_progress_only(long current, long total)
+{
+  draw_progress_bar(current, total);
+  display_refresh();
+}
+
 static long file_size(FL_FILE *f)
 {
   fl_fseek(f, 0, SEEK_END);
@@ -75,46 +199,41 @@ static long file_size(FL_FILE *f)
 
 static void render_image_rgb(const unsigned char *row, int y_src, int mode, int bpp)
 {
-  unsigned char rline[128];
-  unsigned char gline[128];
-  unsigned char bline[128];
-
-  for (int x = 0; x < 128; ++x) {
-    int base = x * bpp;
-    rline[x] = row[base + 0];
-    bline[x] = row[base + 1];
-    gline[x] = row[base + 2];
-  }
-
-  for (int c = 0; c < 3; ++c) {
-    *RGBSEL = c;
-    unsigned char *fb = (unsigned char*)display_framebuffer();
-    for (int x = 0; x < 128; ++x) {
-      int dest_y = x;
-      int dest_x = y_src;
-      if (mode != 0) {
-        dest_x = 127 - y_src;
-      }
-      int dest   = dest_y * 128 + dest_x;
-      unsigned char v = (c == 0) ? rline[x] : (c == 1) ? gline[x] : bline[x];
-      fb[dest] = v;
+  if (mode != 0) return;
+  if (y_src & 1) return;
+  int y_dst = y_src >> 1;
+  if (y_dst < 0 || y_dst >= 64) return;
+  for (int x_dst = 0; x_dst < 64; ++x_dst) {
+    int x_src = x_dst << 1;
+    int base = x_src * bpp;
+    unsigned char r = row[base + 0];
+    unsigned char g = row[base + 2];
+    unsigned char b = row[base + 1];
+    int x = 32 + x_dst;
+    int y = y_dst;
+    for (int c = 0; c < 3; ++c) {
+      *RGBSEL = c;
+      unsigned char *fb = (unsigned char*)display_framebuffer();
+      fb[x*128 + y] = (c == 0) ? r : (c == 1) ? g : b;
     }
   }
 }
 
 static void render_image_gray(const unsigned char *row, int y_src, int mode)
 {
-  for (int c = 0; c < 3; ++c) {
-    *RGBSEL = c;
-    unsigned char *fb = (unsigned char*)display_framebuffer();
-    for (int x = 0; x < 128; ++x) {
-      int dest_y = x;
-      int dest_x = y_src;
-      if (mode != 0) {
-        dest_x = 127 - y_src;
-      }
-      int dest   = dest_y * 128 + dest_x;
-      fb[dest] = row[x];
+  if (mode != 0) return;
+  if (y_src & 1) return;
+  int y_dst = y_src >> 1;
+  if (y_dst < 0 || y_dst >= 64) return;
+  for (int x_dst = 0; x_dst < 64; ++x_dst) {
+    int x_src = x_dst << 1;
+    unsigned char v = row[x_src];
+    int x = 32 + x_dst;
+    int y = y_dst;
+    for (int c = 0; c < 3; ++c) {
+      *RGBSEL = c;
+      unsigned char *fb = (unsigned char*)display_framebuffer();
+      fb[x*128 + y] = v;
     }
   }
 }
@@ -271,8 +390,8 @@ static void clear_screen()
   display_refresh();
 }
 
-// play selected file; returns when done
-static void play_file(const char *filename)
+// play selected file; returns -1 prev, 0 stop, 1 next, 2 done
+static int play_file(const char *filename)
 {
   char path[NAME_LEN + 10];
   int l = 0;
@@ -287,18 +406,25 @@ static void play_file(const char *filename)
     display_set_front_back_color(255,0);
     printf("\n%s not found\n", filename);
     display_refresh();
-    return;
+    return 0;
   }
-  display_set_front_back_color(0,255);
-  printf("\nplaying %s ...\n", filename);
-  display_refresh();
-
+  char title[26];
+  build_title(filename, title, (int)sizeof(title));
   // visual cue even si pas de son (affiche /img/img.raw si présent)
+#if ENABLE_LOADING_MESSAGE
+  clear_screen();
+  show_hourglass();
+#endif
   show_image_for_fixed(filename);
 
   clear_audio();
   *VOLUME = g_volume;
   set_volume_leds(g_volume);
+
+  long total_bytes = file_size(f);
+  long bytes_read = 0;
+  int paused = 0;
+  update_ui(title, bytes_read, total_bytes, paused);
 
   int prev_btns = read_buttons();
   int hold_up_samples = 0;
@@ -306,17 +432,50 @@ static void play_file(const char *filename)
   int repeat_up_samples = 0;
   int repeat_down_samples = 0;
   int current_btns = prev_btns;
+  int buffer_count = 0;
   while (1) {
     int *addr = (int*)(*AUDIO);
-    int sz = fl_fread(addr, 1, 512, f);
-    if (sz <= 0) break;
-    for (int i = sz; i < 512; ++i) { ((unsigned char*)addr)[i] = 128; }
+    int sz = 0;
+    if (paused) {
+      for (int i = 0; i < 512; ++i) { ((unsigned char*)addr)[i] = 128; }
+      sz = 512;
+    } else {
+      sz = fl_fread(addr, 1, 512, f);
+      if (sz <= 0) break;
+      bytes_read += sz;
+      for (int i = sz; i < 512; ++i) { ((unsigned char*)addr)[i] = 128; }
+    }
 
     while (addr == (int*)(*AUDIO)) {
       int btns = read_buttons();
       current_btns = btns;
       int rising = btns & (~prev_btns);
       prev_btns = btns;
+      if (rising & (1<<BTN_PLAYPAUSE)) {
+        paused = !paused;
+        if (paused) {
+          clear_audio();
+        }
+        update_ui(title, bytes_read, total_bytes, paused);
+      }
+      if (rising & (1<<BTN_PREV)) {
+        if (bytes_read < (SAMPLE_RATE_HZ * 2)) {
+          fl_fclose(f);
+          clear_audio();
+          clear_screen();
+          return -1;
+        } else {
+          fl_fseek(f, 0, SEEK_SET);
+          bytes_read = 0;
+          update_ui(title, bytes_read, total_bytes, paused);
+        }
+      }
+      if (rising & (1<<BTN_NEXT)) {
+        fl_fclose(f);
+        clear_audio();
+        clear_screen();
+        return 1;
+      }
       if (rising & (1<<BTN_UP)) {
         if (g_volume < 8) { g_volume++; }
         *VOLUME = g_volume;
@@ -331,7 +490,7 @@ static void play_file(const char *filename)
         fl_fclose(f);
         clear_audio(); // stop immediately
         clear_screen(); // prepare screen for menu redraw
-        return;
+        return 0;
       }
     }
 
@@ -366,12 +525,19 @@ static void play_file(const char *filename)
       hold_down_samples = 0;
       repeat_down_samples = 0;
     }
+
+    buffer_count++;
+    if (!paused && (buffer_count & 3) == 0) {
+      update_progress_only(bytes_read, total_bytes);
+    }
   }
   fl_fclose(f);
   clear_audio(); // ensure silence and clean state
+  clear_screen(); // clean image before returning to menu
   display_set_front_back_color(255,0);
   printf("done.\n");
   display_refresh();
+  return 2;
 }
 
 void main()
@@ -383,19 +549,21 @@ void main()
   oled_fullscreen();
   oled_clear(0);
 
-  display_set_cursor(0,0);
-  display_set_front_back_color(255,0);
-  printf("init sd ... ");
-  display_refresh();
-
   sdcard_init();
   fl_init();
+  int spin = 0;
+#if ENABLE_LOADING_MESSAGE
+  clear_screen();
+  show_hourglass();
+#endif
   while (fl_attach_media(sdcard_readsector, sdcard_writesector) != FAT_INIT_OK) {
+    if (ENABLE_LOADING_MESSAGE && (spin & 0x3FF) == 0) {
+      show_hourglass();
+    }
+    spin++;
     // retry until success
   }
   clear_audio();
-  printf("ok\n");
-  display_refresh();
 
   scan_files();
   int selected = 0;
@@ -418,7 +586,15 @@ void main()
       if (file_count) { selected = (selected + 1) % file_count; }
     }
     if ((rising & (1<<BTN_PLAY)) && file_count > 0) {
-      play_file(files[selected]);
+      int action = play_file(files[selected]);
+      while ((action == 1 || action == -1) && file_count > 0) {
+        if (action == 1) {
+          selected = (selected + 1) % file_count;
+        } else if (action == -1) {
+          selected = (selected - 1 + file_count) % file_count;
+        }
+        action = play_file(files[selected]);
+      }
       need_clear = 0; // play_file clears when exiting on stop; no extra clear
     }
 
