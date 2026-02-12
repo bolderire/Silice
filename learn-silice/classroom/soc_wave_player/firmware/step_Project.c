@@ -16,8 +16,11 @@
 static char files[MAX_FILES][NAME_LEN];
 static int  file_count = 0;
 static int  g_skip_image = 0;
+static int  g_last_was_easter = 0;
 
 static void clear_screen();
+static void render_image_rgb_row(const unsigned char *row, int y_dst, int bpp);
+static void render_image_gray_row(const unsigned char *row, int y_dst);
 
 #define BTN_PLAY   1  // play (raw1)
 #define BTN_UP     3  // B3 (raw3)
@@ -35,7 +38,7 @@ static int g_volume = 4; // initial volume
 
 #define IMG_SIZE 80
 #define IMG_X ((128 - IMG_SIZE) / 2)
-#define IMG_Y 0
+#define IMG_Y 16
 
 #define ENABLE_LOADING_MESSAGE 1
 
@@ -61,6 +64,27 @@ static void show_hourglass()
   display_refresh();
 }
 
+static void show_hourglass_in_image()
+{
+  display_set_front_back_color(255,0);
+  int width_px = 6 * 5;
+  int height_px = 5 * 8;
+  int x = IMG_X + (IMG_SIZE - width_px) / 2;
+  int y = IMG_Y + (IMG_SIZE - height_px) / 2;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  display_set_cursor(x,y + 0*8);
+  printf("+====+");
+  display_set_cursor(x,y + 1*8);
+  printf("|(::)|");
+  display_set_cursor(x,y + 2*8);
+  printf("| )( |");
+  display_set_cursor(x,y + 3*8);
+  printf("|(..)|");
+  display_set_cursor(x,y + 4*8);
+  printf("+====+");
+  display_refresh();
+}
 static void show_easter_ascii()
 {
   clear_screen();
@@ -78,7 +102,7 @@ static void show_easter_ascii()
   display_set_cursor(x,y + 2*8);
   printf("/=^=^=^=^=\\");
   display_set_cursor(x,y + 3*8);
-  printf("^= EASTER =^");
+  printf(":^= EASTER =^;");
   display_set_cursor(x,y + 4*8);
   printf("|^  EGG!   ^|");
   display_set_cursor(x,y + 5*8);
@@ -169,7 +193,7 @@ static int g_last_progress = -1;
 static void draw_progress_bar(long current, long total)
 {
   const int bar_x = 10;
-  const int bar_y = 98;
+  const int bar_y = 100;
   const int bar_w = 108;
   const int bar_h = 3;
   if (total <= 0) return;
@@ -192,14 +216,35 @@ static void draw_progress_bar(long current, long total)
 static void draw_title(const char *title)
 {
   display_set_front_back_color(255,0);
-  display_set_cursor(0,84);
+  int len = 0;
+  while (title[len]) { len++; }
+  int width_px = len * 5;
+  int x = (128 - width_px) / 2;
+  if (x < 0) x = 0;
+  display_set_cursor(x,8);
   printf("%s", title);
 }
 
-static void draw_controls(int paused)
+static void draw_controls(int paused, int prev_level, int next_level)
 {
   display_set_front_back_color(255,0);
-  const char *line = paused ? " <     ||     > " : " <     |>     > ";
+  const char *play = paused ? "  ||  " : "  |>  ";
+  const char *left  = (prev_level >= 2) ? "<<<" : (prev_level == 1) ? " <<" : "  <";
+  const char *right = (next_level >= 2) ? ">>>" : (next_level == 1) ? ">> " : ">  ";
+  char line[32];
+  int n = 0;
+  line[n++] = ' ';
+  for (int i = 0; left[i] && n < (int)sizeof(line)-1; ++i) line[n++] = left[i];
+  line[n++] = ' ';
+  line[n++] = ' ';
+  line[n++] = ' ';
+  for (int i = 0; play[i] && n < (int)sizeof(line)-1; ++i) line[n++] = play[i];
+  line[n++] = ' ';
+  line[n++] = ' ';
+  line[n++] = ' ';
+  for (int i = 0; right[i] && n < (int)sizeof(line)-1; ++i) line[n++] = right[i];
+  line[n++] = ' ';
+  line[n] = 0;
   int len = 0;
   while (line[len]) { len++; }
   int width_px = len * 5;
@@ -241,14 +286,14 @@ static void build_title(const char *filename, char *out, int out_sz)
   out[j] = 0;
 }
 
-static void update_ui(const char *title, long current, long total, int paused)
+static void update_ui(const char *title, long current, long total, int paused, int prev_level, int next_level)
 {
-  fill_rect_gray(0, 80, 128, 48, 0);
+  fill_rect_gray(0, 96, 128, 32, 0);
   g_last_progress = -1;
   draw_back_hint();
   draw_title(title);
   draw_progress_bar(current, total);
-  draw_controls(paused);
+  draw_controls(paused, prev_level, next_level);
   draw_button_labels();
   display_refresh();
 }
@@ -265,6 +310,78 @@ static long file_size(FL_FILE *f)
   long sz = fl_ftell(f);
   fl_fseek(f, 0, SEEK_SET);
   return sz;
+}
+
+static FL_FILE *open_image_file(const char *track, int *out_bpp)
+{
+  char path[NAME_LEN + 10];
+  int l = 0;
+  path[l++] = '/'; path[l++] = 'i'; path[l++] = 'm'; path[l++] = 'g'; path[l++] = '/';
+  for (int i = 0; track[i] && l < (int)sizeof(path)-6; ++i) {
+    path[l++] = track[i];
+  }
+  if (l >= 4) {
+    path[l-4] = '_';
+    path[l-3] = 'i';
+    path[l-2] = 'm';
+    path[l-1] = 'g';
+  }
+  path[l++] = '.';
+  path[l++] = 'r';
+  path[l++] = 'a';
+  path[l++] = 'w';
+  path[l]   = 0;
+
+  FL_FILE *img = fl_fopen(path, "rb");
+  if (img == NULL) {
+    img = fl_fopen("/img/img.raw", "rb");
+    if (img == NULL) return NULL;
+  }
+
+  long sz = file_size(img);
+  if (sz >= 128L * 128 * 4) {
+    *out_bpp = 4;
+  } else if (sz >= 128L * 128 * 3) {
+    *out_bpp = 3;
+  } else if (sz >= 128L * 128) {
+    *out_bpp = 1;
+  } else {
+    fl_fclose(img);
+    return NULL;
+  }
+  return img;
+}
+
+static int load_image_chunk(FL_FILE *img, int bpp, int *img_row, int *last_y_dst, int rows)
+{
+  if (img == NULL) return 0;
+  if (bpp == 4 || bpp == 3) {
+    unsigned char row[128 * 4];
+    for (int r = 0; r < rows && *img_row < 128; ++r, ++(*img_row)) {
+      int row_bytes = (bpp == 4) ? 128 * 4 : 128 * 3;
+      if (fl_fread(row, 1, row_bytes, img) != row_bytes) {
+        return 0;
+      }
+      int y_dst = (*img_row * IMG_SIZE) / 128;
+      if (y_dst != *last_y_dst) {
+        render_image_rgb_row(row, y_dst, bpp);
+        *last_y_dst = y_dst;
+      }
+    }
+  } else {
+    unsigned char row[128];
+    for (int r = 0; r < rows && *img_row < 128; ++r, ++(*img_row)) {
+      if (fl_fread(row, 1, 128, img) != 128) {
+        return 0;
+      }
+      int y_dst = (*img_row * IMG_SIZE) / 128;
+      if (y_dst != *last_y_dst) {
+        render_image_gray_row(row, y_dst);
+        *last_y_dst = y_dst;
+      }
+    }
+  }
+  return (*img_row < 128);
 }
 
 static void render_image_rgb_row(const unsigned char *row, int y_dst, int bpp)
@@ -503,6 +620,7 @@ static void clear_screen()
 // play selected file; returns -1 prev, 0 stop, 1 next, 2 done
 static int play_file(const char *filename)
 {
+  g_last_was_easter = streq(filename, EASTER_TRACK) ? 1 : 0;
   char path[NAME_LEN + 10];
   int l = 0;
   path[l++] = '/'; path[l++] = 'm'; path[l++] = 'u'; path[l++] = 's'; path[l++] = 'i'; path[l++] = 'c'; path[l++] = '/';
@@ -520,17 +638,18 @@ static int play_file(const char *filename)
   }
   char title[26];
   build_title(filename, title, (int)sizeof(title));
-  // visual cue even si pas de son (affiche /img/img.raw si présent)
+  // non-blocking image load
   int skip_image = g_skip_image;
   g_skip_image = 0;
-#if ENABLE_LOADING_MESSAGE
   if (!skip_image) {
     clear_screen();
-    show_hourglass();
   }
-#endif
+  int img_bpp = 0;
+  int img_row = 0;
+  int img_last_y = -1;
+  FL_FILE *img = NULL;
   if (!skip_image) {
-    show_image_for_fixed(filename);
+    img = open_image_file(filename, &img_bpp);
   }
 
   clear_audio();
@@ -540,7 +659,15 @@ static int play_file(const char *filename)
   long total_bytes = file_size(f);
   long bytes_read = 0;
   int paused = 0;
-  update_ui(title, bytes_read, total_bytes, paused);
+  int prev_level = 0;
+  int next_level = 0;
+  int last_prev_level = -1;
+  int last_next_level = -1;
+  int last_paused = -1;
+  update_ui(title, bytes_read, total_bytes, paused, prev_level, next_level);
+  if (img) {
+    show_hourglass_in_image();
+  }
 
   int prev_btns = read_buttons();
   int hold_up_samples = 0;
@@ -548,6 +675,8 @@ static int play_file(const char *filename)
   int repeat_up_samples = 0;
   int repeat_down_samples = 0;
   int current_btns = prev_btns;
+  int hold_prev_samples = 0;
+  int hold_next_samples = 0;
   int buffer_count = 0;
   while (1) {
     int *addr = (int*)(*AUDIO);
@@ -566,31 +695,44 @@ static int play_file(const char *filename)
       int btns = read_buttons();
       current_btns = btns;
       int rising = btns & (~prev_btns);
+      int falling = (~btns) & prev_btns;
       prev_btns = btns;
       if (rising & (1<<BTN_PLAYPAUSE)) {
         paused = !paused;
         if (paused) {
           clear_audio();
         }
-        update_ui(title, bytes_read, total_bytes, paused);
+        update_ui(title, bytes_read, total_bytes, paused, prev_level, next_level);
+        last_paused = paused;
       }
-      if (rising & (1<<BTN_PREV)) {
-        if (bytes_read < (SAMPLE_RATE_HZ * 2)) {
-          fl_fclose(f);
-          clear_audio();
-          clear_screen();
-          return -1;
-        } else {
+      if (falling & (1<<BTN_PREV)) {
+        int prev_hold = hold_prev_samples;
+        hold_prev_samples = 0;
+        if (prev_hold < (SAMPLE_RATE_HZ / 2)) {
+          if (bytes_read < (SAMPLE_RATE_HZ * 2)) {
+            fl_fclose(f);
+            if (img) { fl_fclose(img); img = NULL; }
+            clear_audio();
+            clear_screen();
+            return -1;
+          } else {
           fl_fseek(f, 0, SEEK_SET);
           bytes_read = 0;
-          update_ui(title, bytes_read, total_bytes, paused);
+          update_ui(title, bytes_read, total_bytes, paused, prev_level, next_level);
+          last_paused = paused;
         }
       }
-      if (rising & (1<<BTN_NEXT)) {
-        fl_fclose(f);
-        clear_audio();
-        clear_screen();
-        return 1;
+      }
+      if (falling & (1<<BTN_NEXT)) {
+        int next_hold = hold_next_samples;
+        hold_next_samples = 0;
+        if (next_hold < (SAMPLE_RATE_HZ / 2)) {
+          fl_fclose(f);
+          if (img) { fl_fclose(img); img = NULL; }
+          clear_audio();
+          clear_screen();
+          return 1;
+        }
       }
       if (rising & (1<<BTN_UP)) {
         if (g_volume < 8) { g_volume++; }
@@ -604,6 +746,7 @@ static int play_file(const char *filename)
       }
       if (rising & (1<<BTN_PLAY)) {
         fl_fclose(f);
+        if (img) { fl_fclose(img); img = NULL; }
         clear_audio(); // stop immediately
         clear_screen(); // prepare screen for menu redraw
         return 0;
@@ -642,17 +785,73 @@ static int play_file(const char *filename)
       repeat_down_samples = 0;
     }
 
+    if (current_btns & (1<<BTN_PREV)) {
+      hold_prev_samples += AUDIO_BUFFER_SAMPLES;
+    } else {
+      hold_prev_samples = 0;
+    }
+    if (current_btns & (1<<BTN_NEXT)) {
+      hold_next_samples += AUDIO_BUFFER_SAMPLES;
+    } else {
+      hold_next_samples = 0;
+    }
+
+    prev_level = 0;
+    next_level = 0;
+    if (!paused) {
+      int fast_dir = 0;
+      int fast_step = 0;
+      if (hold_prev_samples >= (SAMPLE_RATE_HZ / 2)) {
+        fast_dir = -1;
+        fast_step = (hold_prev_samples >= (SAMPLE_RATE_HZ * 2)) ? (SAMPLE_RATE_HZ * 2) : (SAMPLE_RATE_HZ / 2);
+        prev_level = (hold_prev_samples >= (SAMPLE_RATE_HZ * 2)) ? 2 : 1;
+      } else if (hold_next_samples >= (SAMPLE_RATE_HZ / 2)) {
+        fast_dir = 1;
+        fast_step = (hold_next_samples >= (SAMPLE_RATE_HZ * 2)) ? (SAMPLE_RATE_HZ * 2) : (SAMPLE_RATE_HZ / 2);
+        next_level = (hold_next_samples >= (SAMPLE_RATE_HZ * 2)) ? 2 : 1;
+      }
+
+      if (fast_dir != 0) {
+        long new_pos = bytes_read + (long)fast_dir * (long)fast_step;
+        if (new_pos < 0) new_pos = 0;
+        if (new_pos > total_bytes) new_pos = total_bytes;
+        fl_fseek(f, new_pos, SEEK_SET);
+        bytes_read = new_pos;
+        for (int i = 0; i < 512; ++i) { ((unsigned char*)addr)[i] = 128; }
+        update_progress_only(bytes_read, total_bytes);
+        draw_controls(paused, prev_level, next_level);
+        display_refresh();
+        last_prev_level = prev_level;
+        last_next_level = next_level;
+        last_paused = paused;
+        continue;
+      }
+    }
+
+    if (prev_level != last_prev_level || next_level != last_next_level || paused != last_paused) {
+      draw_controls(paused, prev_level, next_level);
+      display_refresh();
+      last_prev_level = prev_level;
+      last_next_level = next_level;
+      last_paused = paused;
+    }
+
+    if (img) {
+      if (!load_image_chunk(img, img_bpp, &img_row, &img_last_y, 1)) {
+        fl_fclose(img);
+        img = NULL;
+      }
+    }
+
     buffer_count++;
     if (!paused && (buffer_count & 3) == 0) {
       update_progress_only(bytes_read, total_bytes);
     }
   }
   fl_fclose(f);
+  if (img) { fl_fclose(img); img = NULL; }
   clear_audio(); // ensure silence and clean state
   clear_screen(); // clean image before returning to menu
-  display_set_front_back_color(255,0);
-  printf("done.\n");
-  display_refresh();
   return 2;
 }
 
@@ -723,6 +922,10 @@ void main()
         } else if (action == -1) {
           selected = (selected - 1 + file_count) % file_count;
         }
+        action = play_file(files[selected]);
+      }
+      while (action == 2 && !g_last_was_easter && file_count > 0) {
+        selected = (selected + 1) % file_count;
         action = play_file(files[selected]);
       }
       need_clear = 0; // play_file clears when exiting on stop; no extra clear
