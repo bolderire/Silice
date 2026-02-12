@@ -11,9 +11,13 @@
 #define MAX_FILES 32
 #define NAME_LEN  64
 #define MUSIC_DIR "/music"
+#define EASTER_TRACK "rickroll.raw"
 
 static char files[MAX_FILES][NAME_LEN];
 static int  file_count = 0;
+static int  g_skip_image = 0;
+
+static void clear_screen();
 
 #define BTN_PLAY   1  // play (raw1)
 #define BTN_UP     3  // B3 (raw3)
@@ -28,6 +32,10 @@ static int g_volume = 4; // initial volume
 #define REPEAT_DELAY_SAMPLES  (SAMPLE_RATE_HZ/3)  // 300ms
 #define REPEAT_PERIOD_SAMPLES (SAMPLE_RATE_HZ/10) // 100ms
 #define AUDIO_BUFFER_SAMPLES  512
+
+#define IMG_SIZE 80
+#define IMG_X ((128 - IMG_SIZE) / 2)
+#define IMG_Y 0
 
 #define ENABLE_LOADING_MESSAGE 1
 
@@ -53,6 +61,36 @@ static void show_hourglass()
   display_refresh();
 }
 
+static void show_easter_ascii()
+{
+  clear_screen();
+  display_set_front_back_color(255,0);
+  int width_px = 12 * 5;
+  int height_px = 9 * 8;
+  int x = IMG_X + (IMG_SIZE - width_px) / 2;
+  int y = IMG_Y + (IMG_SIZE - height_px) / 2;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  display_set_cursor(x,y + 0*8);
+  printf("   .-\"-.");
+  display_set_cursor(x,y + 1*8);
+  printf(" .'=^=^='.");
+  display_set_cursor(x,y + 2*8);
+  printf("/=^=^=^=^=\\");
+  display_set_cursor(x,y + 3*8);
+  printf("^= EASTER =^");
+  display_set_cursor(x,y + 4*8);
+  printf("|^  EGG!   ^|");
+  display_set_cursor(x,y + 5*8);
+  printf(":^=^=^=^=^=^:");
+  display_set_cursor(x,y + 6*8);
+  printf(" \\=^=^=^=^=/");
+  display_set_cursor(x,y + 7*8);
+  printf("  `.=====.'");
+  display_set_cursor(x,y + 8*8);
+  printf("    `~~~`");
+  display_refresh();
+}
 
 static inline int read_buttons()
 {
@@ -96,6 +134,16 @@ static void set_volume_leds(int volume)
   *LEDS = mask;
 }
 
+static int streq(const char *a, const char *b)
+{
+  int i = 0;
+  while (a[i] && b[i]) {
+    if (a[i] != b[i]) return 0;
+    i++;
+  }
+  return a[i] == b[i];
+}
+
 static void set_pixel_gray(int x, int y, unsigned char v)
 {
   if (x < 0 || x >= 128 || y < 0 || y >= 128) return;
@@ -121,7 +169,7 @@ static int g_last_progress = -1;
 static void draw_progress_bar(long current, long total)
 {
   const int bar_x = 10;
-  const int bar_y = 90;
+  const int bar_y = 98;
   const int bar_w = 108;
   const int bar_h = 3;
   if (total <= 0) return;
@@ -144,21 +192,41 @@ static void draw_progress_bar(long current, long total)
 static void draw_title(const char *title)
 {
   display_set_front_back_color(255,0);
-  display_set_cursor(0,68);
+  display_set_cursor(0,84);
   printf("%s", title);
 }
 
 static void draw_controls(int paused)
 {
   display_set_front_back_color(255,0);
-  const char *line = paused ? " <   ||   > " : " <   >    > ";
+  const char *line = paused ? " <     ||     > " : " <     |>     > ";
   int len = 0;
   while (line[len]) { len++; }
   int width_px = len * 5;
   int x = (128 - width_px) / 2;
   if (x < 0) x = 0;
-  display_set_cursor(x,104);
+  display_set_cursor(x,108);
   printf("%s", line);
+}
+
+static void draw_button_labels()
+{
+  display_set_front_back_color(255,0);
+  const char *line = "B5     B2     B6";
+  int len = 0;
+  while (line[len]) { len++; }
+  int width_px = len * 5;
+  int x = (128 - width_px) / 2;
+  if (x < 0) x = 0;
+  display_set_cursor(x,116);
+  printf("%s", line);
+}
+
+static void draw_back_hint()
+{
+  display_set_front_back_color(255,0);
+  display_set_cursor(0,0);
+  printf("< B1");
 }
 
 static void build_title(const char *filename, char *out, int out_sz)
@@ -175,11 +243,13 @@ static void build_title(const char *filename, char *out, int out_sz)
 
 static void update_ui(const char *title, long current, long total, int paused)
 {
-  fill_rect_gray(0, 64, 128, 64, 0);
+  fill_rect_gray(0, 80, 128, 48, 0);
   g_last_progress = -1;
+  draw_back_hint();
   draw_title(title);
   draw_progress_bar(current, total);
   draw_controls(paused);
+  draw_button_labels();
   display_refresh();
 }
 
@@ -197,20 +267,17 @@ static long file_size(FL_FILE *f)
   return sz;
 }
 
-static void render_image_rgb(const unsigned char *row, int y_src, int mode, int bpp)
+static void render_image_rgb_row(const unsigned char *row, int y_dst, int bpp)
 {
-  if (mode != 0) return;
-  if (y_src & 1) return;
-  int y_dst = y_src >> 1;
-  if (y_dst < 0 || y_dst >= 64) return;
-  for (int x_dst = 0; x_dst < 64; ++x_dst) {
-    int x_src = x_dst << 1;
+  if (y_dst < 0 || y_dst >= IMG_SIZE) return;
+  for (int x_dst = 0; x_dst < IMG_SIZE; ++x_dst) {
+    int x_src = (x_dst * 128) / IMG_SIZE;
     int base = x_src * bpp;
     unsigned char r = row[base + 0];
     unsigned char g = row[base + 2];
     unsigned char b = row[base + 1];
-    int x = 32 + x_dst;
-    int y = y_dst;
+    int x = IMG_X + x_dst;
+    int y = IMG_Y + y_dst;
     for (int c = 0; c < 3; ++c) {
       *RGBSEL = c;
       unsigned char *fb = (unsigned char*)display_framebuffer();
@@ -219,17 +286,14 @@ static void render_image_rgb(const unsigned char *row, int y_src, int mode, int 
   }
 }
 
-static void render_image_gray(const unsigned char *row, int y_src, int mode)
+static void render_image_gray_row(const unsigned char *row, int y_dst)
 {
-  if (mode != 0) return;
-  if (y_src & 1) return;
-  int y_dst = y_src >> 1;
-  if (y_dst < 0 || y_dst >= 64) return;
-  for (int x_dst = 0; x_dst < 64; ++x_dst) {
-    int x_src = x_dst << 1;
+  if (y_dst < 0 || y_dst >= IMG_SIZE) return;
+  for (int x_dst = 0; x_dst < IMG_SIZE; ++x_dst) {
+    int x_src = (x_dst * 128) / IMG_SIZE;
     unsigned char v = row[x_src];
-    int x = 32 + x_dst;
-    int y = y_dst;
+    int x = IMG_X + x_dst;
+    int y = IMG_Y + y_dst;
     for (int c = 0; c < 3; ++c) {
       *RGBSEL = c;
       unsigned char *fb = (unsigned char*)display_framebuffer();
@@ -241,13 +305,19 @@ static void render_image_gray(const unsigned char *row, int y_src, int mode)
 static void render_image_stream(FL_FILE *img, int mode)
 {
   long sz = file_size(img);
+  int last_y_dst = -1;
   if (sz >= 128L * 128 * 4) {
     unsigned char row[128 * 4];
     for (int y = 0; y < 128; ++y) {
       if (fl_fread(row, 1, sizeof(row), img) != sizeof(row)) {
         break;
       }
-      render_image_rgb(row, y, mode, 4);
+      if (mode != 0) continue;
+      int y_dst = (y * IMG_SIZE) / 128;
+      if (y_dst != last_y_dst) {
+        render_image_rgb_row(row, y_dst, 4);
+        last_y_dst = y_dst;
+      }
     }
   } else if (sz >= 128L * 128 * 3) {
     unsigned char row[128 * 3];
@@ -255,7 +325,12 @@ static void render_image_stream(FL_FILE *img, int mode)
       if (fl_fread(row, 1, sizeof(row), img) != sizeof(row)) {
         break;
       }
-      render_image_rgb(row, y, mode, 3);
+      if (mode != 0) continue;
+      int y_dst = (y * IMG_SIZE) / 128;
+      if (y_dst != last_y_dst) {
+        render_image_rgb_row(row, y_dst, 3);
+        last_y_dst = y_dst;
+      }
     }
   } else if (sz >= 128L * 128) {
     unsigned char row[128];
@@ -263,7 +338,12 @@ static void render_image_stream(FL_FILE *img, int mode)
       if (fl_fread(row, 1, sizeof(row), img) != sizeof(row)) {
         break;
       }
-      render_image_gray(row, y, mode);
+      if (mode != 0) continue;
+      int y_dst = (y * IMG_SIZE) / 128;
+      if (y_dst != last_y_dst) {
+        render_image_gray_row(row, y_dst);
+        last_y_dst = y_dst;
+      }
     }
   }
 }
@@ -276,6 +356,9 @@ static void scan_files()
     struct fs_dir_ent dirent;
     while (fl_readdir(&dirstat, &dirent) == 0 && file_count < MAX_FILES) {
       if (!dirent.is_dir) {
+        if (streq(dirent.filename, EASTER_TRACK)) {
+          continue;
+        }
         int len = strlen(dirent.filename);
         if (len >= 4 &&
             dirent.filename[len-4] == '.' &&
@@ -311,6 +394,33 @@ static void draw_menu(int selected)
     }
   }
   display_refresh();
+}
+
+static int update_secret_sequence(int input)
+{
+  static const int seq[8] = {
+    BTN_UP, BTN_UP, BTN_DOWN, BTN_DOWN, BTN_PREV, BTN_NEXT, BTN_PREV, BTN_NEXT
+  };
+  static int idx = 0;
+  static int idle = 0;
+
+  if (input == 0) {
+    idle++;
+    if (idle > 4000) { idx = 0; idle = 0; }
+    return 0;
+  }
+
+  idle = 0;
+  if (input == seq[idx]) {
+    idx++;
+    if (idx == 8) {
+      idx = 0;
+      return 1;
+    }
+  } else {
+    idx = (input == seq[0]) ? 1 : 0;
+  }
+  return 0;
 }
 
 // display image for a given track if available, else show default /img/img.raw (no rotation)
@@ -411,11 +521,17 @@ static int play_file(const char *filename)
   char title[26];
   build_title(filename, title, (int)sizeof(title));
   // visual cue even si pas de son (affiche /img/img.raw si présent)
+  int skip_image = g_skip_image;
+  g_skip_image = 0;
 #if ENABLE_LOADING_MESSAGE
-  clear_screen();
-  show_hourglass();
+  if (!skip_image) {
+    clear_screen();
+    show_hourglass();
+  }
 #endif
-  show_image_for_fixed(filename);
+  if (!skip_image) {
+    show_image_for_fixed(filename);
+  }
 
   clear_audio();
   *VOLUME = g_volume;
@@ -578,6 +694,20 @@ void main()
     draw_menu(selected);
     int btns = read_buttons();
     int rising = btns & (~prev_btns);
+
+    int secret_input = 0;
+    if (rising & (1<<BTN_UP)) { secret_input = BTN_UP; }
+    else if (rising & (1<<BTN_DOWN)) { secret_input = BTN_DOWN; }
+    else if (rising & (1<<BTN_PREV)) { secret_input = BTN_PREV; }
+    else if (rising & (1<<BTN_NEXT)) { secret_input = BTN_NEXT; }
+    if (update_secret_sequence(secret_input)) {
+      g_skip_image = 1;
+      show_easter_ascii();
+      play_file(EASTER_TRACK);
+      need_clear = 1;
+      prev_btns = btns;
+      continue;
+    }
 
     if (rising & (1<<BTN_UP)) {
       if (file_count) { selected = (selected - 1 + file_count) % file_count; }
